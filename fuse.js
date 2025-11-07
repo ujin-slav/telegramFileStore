@@ -1,4 +1,4 @@
-const fuse = require('node-fuse-bindings');
+const fuse = require('fuse-native');
 const path = require('path');
 
 // Хранилище: Map<path, data>
