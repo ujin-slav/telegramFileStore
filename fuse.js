@@ -1,147 +1,146 @@
-const fuse = require('fuse-bindings');
-const { Buffer } = require('node:buffer');
+const fuse = require('node-fuse-bindings');
+const path = require('path');
 
-// Хранилище: Map с путями как ключами
+// Хранилище: Map<path, data>
 const storage = new Map();
 
-/**
- * Инициализация корневой директории
- */
-function initRoot() {
-  // Корневая директория
-  storage.set('/', {
-    type: 'dir',
-    ino: 1,
+// Инициализация корневой директории
+storage.set('/', {
+  type: 'directory',
+  mode: 0o755,
+  size: 4096,
+  mtime: new Date(),
+  children: new Set()
+});
+
+// Вспомогательная функция: получить запись по пути
+function getEntry(p) {
+  return storage.get(path.normalize(p));
+}
+
+// Создать директорию
+function mkdir(p, mode = 0o755) {
+  const parentPath = path.dirname(p);
+  const name = path.basename(p);
+
+  const parent = getEntry(parentPath);
+  if (!parent || parent.type !== 'directory') return -fuse.ENOENT;
+
+  const fullPath = path.normalize(p);
+  if (storage.has(fullPath)) return -fuse.EEXIST;
+
+  storage.set(fullPath, {
+    type: 'directory',
+    mode,
     size: 4096,
     mtime: new Date(),
-    atime: new Date(),
-    ctime: new Date(),
-    children: new Set(['hello.txt', 'subdir']),
+    children: new Set()
   });
 
-  // Файл hello.txt
-  storage.set('/hello.txt', {
+  parent.children.add(name);
+  parent.mtime = new Date();
+  return 0;
+}
+
+// Создать файл
+function createFile(p, mode = 0o644) {
+  const parentPath = path.dirname(p);
+  const name = path.basename(p);
+
+  const parent = getEntry(parentPath);
+  if (!parent || parent.type !== 'directory') return -fuse.ENOENT;
+
+  const fullPath = path.normalize(p);
+  if (storage.has(fullPath)) return -fuse.EEXIST;
+
+  storage.set(fullPath, {
     type: 'file',
-    ino: 2,
-    size: 13,
+    mode,
+    size: 0,
     mtime: new Date(),
-    atime: new Date(),
     ctime: new Date(),
-    content: Buffer.from('Hello, World!'),
+    content: Buffer.alloc(0)
   });
 
-  // Поддиректория
-  storage.set('/subdir', {
-    type: 'dir',
-    ino: 3,
-    size: 4096,
-    mtime: new Date(),
-    atime: new Date(),
-    ctime: new Date(),
-    children: new Set(['nested.txt']),
-  });
-
-  storage.set('/subdir/nested.txt', {
-    type: 'file',
-    ino: 4,
-    size: 6,
-    mtime: new Date(),
-    atime: new Date(),
-    ctime: new Date(),
-    content: Buffer.from('Nested'),
-  });
+  parent.children.add(name);
+  parent.mtime = new Date();
+  return 0;
 }
 
-// Утилита: нормализация пути
-function normalize(path) {
-  return path.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-}
+// FUSE операции
+const mountPath = '/tmp/fuse-map-fs'; // Путь для монтирования
+const fuseOps = {
+  readdir(p, cb) {
+    console.log('readdir:', p);
+    const entry = getEntry(p);
+    if (!entry || entry.type !== 'directory') return cb(fuse.ENOENT);
 
-// Утилита: получение родителя
-function getParent(path) {
-  const parts = path.split('/');
-  parts.pop();
-  return parts.join('/') || '/';
-}
-
-const ops = {
-  readdir(path, cb) {
-    path = normalize(path);
-    console.log('readdir', path);
-
-    const entry = storage.get(path);
-    if (!entry || entry.type !== 'dir') {
-      return cb(fuse.ENOENT);
-    }
-
-    cb(0, Array.from(entry.children));
+    const list = ['.', '..', ...entry.children];
+    cb(0, list);
   },
 
-  getattr(path, cb) {
-    path = normalize(path);
-    console.log('getattr', path);
-
-    const entry = storage.get(path);
-    if (!entry) {
-      return cb(fuse.ENOENT);
+  getattr(p, cb) {
+    console.log('getattr:', p);
+    if (p === '/') {
+      return cb(0, {
+        mtime: new Date(),
+        atime: new Date(),
+        ctime: new Date(),
+        nlink: 1,
+        size: 4096,
+        mode: 0o040755, // директория
+        uid: process.getuid(),
+        gid: process.getgid()
+      });
     }
 
-    const now = new Date();
+    const entry = getEntry(p);
+    if (!entry) return cb(fuse.ENOENT);
+
     const stat = {
-      ino: entry.ino,
-      size: entry.size,
-      mode: entry.type === 'dir' ? 16877 : 33188, // dir: 040755, file: 100644
-      atime: entry.atime,
       mtime: entry.mtime,
-      ctime: entry.ctime,
-      nlink: 1,
-      uid: process.getuid ? process.getuid() : 0,
-      gid: process.getgid ? process.getgid() : 0,
+      atime: entry.mtime,
+      ctime: entry.ctime || entry.mtime,
+      size: entry.size,
+      mode: entry.type === 'directory' ? 0o040000 | entry.mode : 0o100000 | entry.mode,
+      uid: process.getuid(),
+      gid: process.getgid(),
+      nlink: 1
     };
 
     cb(0, stat);
   },
 
-  open(path, flags, cb) {
-    path = normalize(path);
-    console.log('open', path, flags);
-
-    const entry = storage.get(path);
-    if (!entry || entry.type !== 'file') {
-      return cb(fuse.ENOENT);
-    }
-
+  open(p, flags, cb) {
+    console.log('open:', p, flags);
+    const entry = getEntry(p);
+    if (!entry) return cb(fuse.ENOENT);
+    if (entry.type !== 'file') return cb(fuse.EISDIR);
     cb(0, 42); // file handle
   },
 
-  read(path, handle, buf, len, offset, cb) {
-    path = normalize(path);
-    console.log('read', path, offset, len);
+  release(p, fd, cb) {
+    console.log('release:', p);
+    cb(0);
+  },
 
-    const entry = storage.get(path);
-    if (!entry || entry.type !== 'file') {
-      return cb(fuse.ENOENT);
-    }
+  read(p, fd, buf, len, offset, cb) {
+    console.log('read:', p, offset, len);
+    const entry = getEntry(p);
+    if (!entry || entry.type !== 'file') return cb(fuse.ENOENT);
 
     const data = entry.content;
-    if (offset >= data.length) {
-      return cb(0);
-    }
+    if (offset >= data.length) return cb(0);
 
     const slice = data.slice(offset, offset + len);
     slice.copy(buf);
     cb(slice.length);
   },
 
-  // Опционально: поддержка записи
-  write(path, handle, buf, len, offset, cb) {
-    path = normalize(path);
-    console.log('write', path, offset, len);
-
-    let entry = storage.get(path);
-    if (!entry || entry.type !== 'file') {
-      return cb(fuse.ENOENT);
-    }
+  write(p, fd, buf, len, offset, cb) {
+    console.log('write:', p, offset, len);
+    const entry = getEntry(p);
+    if (!entry || entry.type !== 'file') return cb(fuse.ENOENT);
 
     const newData = Buffer.alloc(Math.max(entry.content.length, offset + len));
     entry.content.copy(newData);
@@ -151,133 +150,105 @@ const ops = {
     entry.size = newData.length;
     entry.mtime = new Date();
 
-    storage.set(path, entry);
     cb(len);
   },
 
-  create(path, mode, cb) {
-    path = normalize(path);
-    console.log('create', path);
+  truncate(p, size, cb) {
+    console.log('truncate:', p, size);
+    const entry = getEntry(p);
+    if (!entry || entry.type !== 'file') return cb(fuse.ENOENT);
 
-    if (storage.has(path)) {
-      return cb(fuse.EEXIST);
+    if (size === 0) {
+      entry.content = Buffer.alloc(0);
+    } else if (size < entry.content.length) {
+      entry.content = entry.content.slice(0, size);
+    } else {
+      const newBuf = Buffer.alloc(size);
+      entry.content.copy(newBuf);
+      newBuf.fill(0, entry.content.length);
+      entry.content = newBuf;
     }
 
-    const parentPath = getParent(path);
-    const parent = storage.get(parentPath);
-    if (!parent || parent.type !== 'dir') {
-      return cb(fuse.ENOENT);
-    }
-
-    const filename = path.split('/').pop();
-    const ino = storage.size + 1;
-
-    storage.set(path, {
-      type: 'file',
-      ino,
-      size: 0,
-      mtime: new Date(),
-      atime: new Date(),
-      ctime: new Date(),
-      content: Buffer.alloc(0),
-    });
-
-    parent.children.add(filename);
-    storage.set(parentPath, parent);
-
-    cb(0, 42); // handle
+    entry.size = size;
+    entry.mtime = new Date();
+    cb(0);
   },
 
-  mkdir(path, mode, cb) {
-    path = normalize(path);
-    console.log('mkdir', path);
-
-    if (storage.has(path)) {
-      return cb(fuse.EEXIST);
+  create(p, mode, cb) {
+    console.log('create:', p, mode);
+    const result = createFile(p, mode);
+    if (result === 0) {
+      cb(0, 42); // file handle
+    } else {
+      cb(result);
     }
+  },
 
-    const parentPath = getParent(path);
-    const parent = storage.get(parentPath);
-    if (!parent || parent.type !== 'dir') {
-      return cb(fuse.ENOENT);
-    }
+  mkdir(p, mode, cb) {
+    console.log('mkdir:', p, mode);
+    const result = mkdir(p, mode);
+    cb(result);
+  },
 
-    const dirname = path.split('/').pop();
-    const ino = storage.size + 1;
+  unlink(p, cb) {
+    console.log('unlink:', p);
+    const parentPath = path.dirname(p);
+    const name = path.basename(p);
 
-    storage.set(path, {
-      type: 'dir',
-      ino,
-      size: 4096,
-      mtime: new Date(),
-      atime: new Date(),
-      ctime: new Date(),
-      children: new Set(),
-    });
+    const parent = getEntry(parentPath);
+    if (!parent || parent.type !== 'directory') return cb(fuse.ENOENT);
 
-    parent.children.add(dirname);
-    storage.set(parentPath, parent);
+    if (!storage.has(p)) return cb(fuse.ENOENT);
+
+    storage.delete(p);
+    parent.children.delete(name);
+    parent.mtime = new Date();
 
     cb(0);
   },
 
-  // Поддержка удаления (опционально)
-  unlink(path, cb) {
-    path = normalize(path);
-    console.log('unlink', path);
+  rmdir(p, cb) {
+    console.log('rmdir:', p);
+    const entry = getEntry(p);
+    if (!entry || entry.type !== 'directory') return cb(fuse.ENOENT);
+    if (entry.children.size > 0) return cb(fuse.ENOTEMPTY);
 
-    const entry = storage.get(path);
-    if (!entry || entry.type !== 'file') {
-      return cb(fuse.ENOENT);
+    const parentPath = path.dirname(p);
+    const name = path.basename(p);
+    const parent = getEntry(parentPath);
+    if (parent) {
+      parent.children.delete(name);
+      parent.mtime = new Date();
     }
 
-    const parentPath = getParent(path);
-    const parent = storage.get(parentPath);
-    const filename = path.split('/').pop();
-    parent.children.delete(filename);
-
-    storage.delete(path);
+    storage.delete(p);
     cb(0);
-  },
-
-  rmdir(path, cb) {
-    path = normalize(path);
-    console.log('rmdir', path);
-
-    const entry = storage.get(path);
-    if (!entry || entry.type !== 'dir' || entry.children.size > 0) {
-      return cb(entry.children.size > 0 ? fuse.ENOTEMPTY : fuse.ENOENT);
-    }
-
-    const parentPath = getParent(path);
-    const parent = storage.get(parentPath);
-    const dirname = path.split('/').pop();
-    parent.children.delete(dirname);
-
-    storage.delete(path);
-    cb(0);
-  },
+  }
 };
 
-// Инициализация
-initRoot();
+// Создать тестовые данные
+mkdir('/hello');
+createFile('/hello/world.txt');
+const helloFile = getEntry('/hello/world.txt');
+helloFile.content = Buffer.from('Привет из Map!\n');
+helloFile.size = helloFile.content.length;
 
 // Монтирование
-const mountPath = process.argv[2] || '/tmp/fuse-map-fs';
-
-fuse.mount(mountPath, ops, (err) => {
+console.log(`Монтирование в ${mountPath}...`);
+fuse.mount(mountPath, fuseOps, (err) => {
   if (err) throw err;
-  console.log(`Файловая система смонтирована на ${mountPath}`);
-  console.log(`Содержимое:`);
-  console.log('  /hello.txt');
-  console.log('  /subdir/nested.txt');
+  console.log('Файловая система смонтирована!');
+  console.log('Нажмите Ctrl+C для размонтирования');
 });
 
-// Отмонтирование при завершении
+// Обработка завершения
 process.on('SIGINT', () => {
   fuse.unmount(mountPath, (err) => {
-    if (err) console.error('Ошибка отмонтирования:', err);
-    else console.log('Отмонтировано');
+    if (err) {
+      console.error('Ошибка при размонтировании:', err);
+    } else {
+      console.log('Размонтировано.');
+    }
     process.exit();
   });
 });
