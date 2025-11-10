@@ -4,8 +4,8 @@ const path = require('path');
 const fs = require('fs');
 
 // === Конфигурация ===
-const TELEGRAM_TOKEN = '7595878071:AAExDmqJ0a7mewi3kI7TS3WfUzMMxmN_w5A';
-const CHAT_ID = '-5049606407'; // ID группы (должен начинаться с -100...)
+const TELEGRAM_TOKEN = '';
+const CHAT_ID = ''; // ID группы (должен начинаться с -100...)
 const MOUNT_POINT = path.resolve('/tmp/fuse-map', 'mountpoint');
 
 // Создаём папку монтирования

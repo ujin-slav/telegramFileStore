@@ -113,7 +113,7 @@ const ops = {
   }
 };
 
-// Монтирование
+// Монтирование   44
 const mountPath = process.argv[2] || '/tmp/fuse-map';
 console.log(`Монтируем FUSE на ${mountPath}`);
 
